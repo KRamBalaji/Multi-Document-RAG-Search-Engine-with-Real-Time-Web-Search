@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, HttpUrl
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from uuid import uuid4
 
 class Document(BaseModel):
@@ -35,3 +35,10 @@ class AnswerSource(BaseModel):
     url: Optional[str] = None
     snippet: str
     relevance_label: str  # E.g., 'Primary Evidence', 'Supporting Context'
+
+class QueryRoute(BaseModel):
+    """Route a user query to the most appropriate data source."""
+    logic: Literal["internal", "web", "hybrid"] = Field(
+        ...,
+        description="Given a user question, choose to route it to local documents, web search, or both."
+    )
