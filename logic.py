@@ -1,5 +1,6 @@
 from typing import List
 from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
 from models import QueryRoute, WebSearchResult
 from langchain_community.tools.tavily_search import TavilySearchResults
 import os
@@ -39,3 +40,75 @@ def execute_web_search(query: str, k: int = 3) -> List[WebSearchResult]:
         ))
     
     return web_docs
+
+def generate_hybrid_answer(query: str, context: dict):
+    """
+    Combines FAISS chunks and Tavily snippets into a cited answer.
+    """
+    llm = ChatGroq(model="llama3-7b-8192", temperature=0)
+    
+    # 1. Format Document Chunks
+    doc_context = ""
+    for i, doc in enumerate(context.get("docs", [])):
+        source_title = doc.metadata.get("title", "Unknown Doc")
+        doc_context += f"\n[Doc] {source_title} (Chunk {i}): {doc.page_content}\n"
+
+    # 2. Format Web Results
+    web_context = ""
+    for res in context.get("web", []):
+        web_context += f"\n[Web] Tavily: {res.title} (URL: {res.url}): {res.content}\n"
+
+    # 3. Construct System Prompt
+    system_msg = """You are a grounded research assistant. 
+    Use the provided context to answer the user's question. 
+    
+    RULES:
+    1. Only use the provided context. If unsure, say you don't know.
+    2. Cite every claim using the exact format: [Doc] Title – Chunk# or [Web] Tavily: Title.
+    3. Keep the tone professional and objective.
+    
+    CONTEXT:
+    {doc_context}
+    {web_context}
+    """
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_msg),
+        ("human", "{query}")
+    ])
+    
+    chain = prompt | llm
+    response = chain.invoke({
+        "doc_context": doc_context,
+        "web_context": web_context,
+        "query": query
+    })
+    
+    return response.content
+
+def generate_source_summaries(context: dict, n: int = 3):
+    """Generates concise summaries for the top N unique documents found."""
+    llm = ChatGroq(model="llama3-8b-8192", temperature=0.1)
+    summaries = []
+    
+    # Extract unique documents from the top chunks
+    seen_sources = set()
+    top_docs = []
+    for doc in context.get("docs", []):
+        title = doc.metadata.get("title")
+        if title not in seen_sources:
+            top_docs.append(doc)
+            seen_sources.add(title)
+        if len(top_docs) >= n: break
+
+    # Summarize each unique document
+    for doc in top_docs:
+        summary_prompt = f"Summarize the key points of this document snippet in 2 sentences:\n\n{doc.page_content}"
+        summary = llm.invoke(summary_prompt).content
+        summaries.append({
+            "title": doc.metadata.get("title"),
+            "summary": summary,
+            "type": "Doc"
+        })
+        
+    return summaries
