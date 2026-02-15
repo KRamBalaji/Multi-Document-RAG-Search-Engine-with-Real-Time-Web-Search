@@ -1,12 +1,17 @@
 from typing import List
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
+from ingestion import VectorEngine
 from models import QueryRoute, WebSearchResult
 from langchain_community.tools.tavily_search import TavilySearchResults
 import os
 
 def classify_query(query: str) -> str:
-    llm = ChatGroq(model="llama-3-8b-8192", temperature=0)
+    llm = ChatGroq(
+    temperature=0, 
+    model_name="llama-3.1-8b-instant", # Updated model name
+    groq_api_key=os.getenv("GROQ_API_KEY")
+    )
     structured_llm = llm.with_structured_output(QueryRoute)
     
     system_prompt = """You are an expert query router. 
@@ -19,6 +24,20 @@ def classify_query(query: str) -> str:
         ("human", query)
     ])
     return result.logic
+
+def gather_context(query: str):
+    route = classify_query(query)
+    context = {"docs": [], "web": [], "route": route}
+    
+    if route in ["internal", "hybrid"]:
+        # Retrieve from our VectorEngine(FAISS)
+        context["docs"] = VectorEngine.semantic_search(query, k=3)
+        
+    if route in ["web", "hybrid"]:
+        # Retrieve from Tavily
+        context["web"] = execute_web_search(query, k=3)
+        
+    return context
 
 def execute_web_search(query: str, k: int = 3) -> List[WebSearchResult]:
     """Executes a real-time search and returns standardized web results."""
