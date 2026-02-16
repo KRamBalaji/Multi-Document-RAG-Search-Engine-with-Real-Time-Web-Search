@@ -1,5 +1,7 @@
 import re
 import os
+import tempfile
+import streamlit as st
 from typing import List
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, WikipediaLoader
 from langchain_core.documents import Document as LCDocument
@@ -21,47 +23,42 @@ def clean_text(text: str) -> str:
 
 # 2. Normalized Ingestion Pipeline
 class DocumentIngestor:
-    def __init__(self):
-        self.documents: List[Document] = []
+    def process_files(self, uploaded_files):
+        """Processes Streamlit uploaded files into a list of LangChain Document objects."""
+        all_docs = []
+        
+        for uploaded_file in uploaded_files:
+            # 1. Create a temporary file to store the uploaded content
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_path = tmp_file.name
 
-    def load_pdfs(self, file_paths: List[str]):
-        for path in file_paths:
-            loader = PyPDFLoader(path)
-            raw_docs = loader.load()
-            # Combine pages into one Document object for consistency
-            full_content = " ".join([d.page_content for d in raw_docs])
-            self.documents.append(Document(
-                source_type="pdf",
-                title=path.split("/")[-1],
-                content=clean_text(full_content),
-                metadata={"file_path": path}
-            ))
-
-    def load_wikipedia(self, queries: List[str]):
-        for query in queries:
-            loader = WikipediaLoader(query=query, load_max_docs=1)
-            raw_docs = loader.load()
-            for d in raw_docs:
-                self.documents.append(Document(
-                    source_type="wikipedia",
-                    title=d.metadata.get("title", query),
-                    content=clean_text(d.page_content),
-                    metadata={"source_url": d.metadata.get("source")}
-                ))
-
-    def load_text_files(self, file_paths: List[str]):
-        for path in file_paths:
-            loader = TextLoader(path)
-            d = loader.load()[0]
-            self.documents.append(Document(
-                source_type="text",
-                title=path.split("/")[-1],
-                content=clean_text(d.page_content),
-                metadata={"file_path": path}
-            ))
-
-    def get_all_documents(self) -> List[Document]:
-        return self.documents
+            try:
+                # 2. Choose the correct loader based on file extension
+                if uploaded_file.name.endswith(".pdf"):
+                    loader = PyPDFLoader(tmp_path)
+                elif uploaded_file.name.endswith(".txt"):
+                    loader = TextLoader(tmp_path)
+                else:
+                    st.warning(f"Unsupported file type: {uploaded_file.name}")
+                    continue
+                
+                # 3. Load and add to our list
+                docs = loader.load()
+                # Manually add metadata to help FAISS later
+                for doc in docs:
+                    doc.metadata["title"] = uploaded_file.name
+                    doc.metadata["source_type"] = "local"
+                
+                all_docs.extend(docs)
+                
+            finally:
+                # 4. Clean up the temporary file
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+        
+        # 5. Return the list of Document objects
+        return all_docs
     
 
 # 4. Chunking Strategy
@@ -94,48 +91,60 @@ def chunk_documents(documents: List[Document]) -> List[DocumentChunk]:
 
 # 5 & 6. FAISS Vector Store & Semantic Search
 class VectorEngine:
-    def __init__(self, index_path="faiss_index"):
-        # We use a standard open-source embedding model
+    def __init__(self):
+        # Initialize your embedding model here
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        self.index_path = index_path
         self.vector_store = None
+        self.save_path = "faiss_index"
 
-    def index_documents(self, chunks: List[DocumentChunk]):
-        """Creates and persists a FAISS index from document chunks."""
-        texts = [c.content for c in chunks]
-        metadatas = [c.metadata for c in chunks]
+    def index_documents(self, chunks):
+        """Creates a FAISS index from document chunks and saves it locally."""
+        if not chunks:
+            return None
         
-        self.vector_store = FAISS.from_texts(
-            texts=texts,
-            embedding=self.embeddings,
-            metadatas=metadatas
-        )
-        self.vector_store.save_local(self.index_path)
-        print(f"Index saved to {self.index_path}")
+        # 1. Create the vector store from chunks
+        self.vector_store = FAISS.from_documents(chunks, self.embeddings)
+        
+        # 2. Save the index to a local folder for persistence
+        self.vector_store.save_local(self.save_path)
+        print(f"Index successfully saved to {self.save_path}")
+        
+        return self.vector_store
 
     def load_faiss_index(self):
-        """Loads the local FAISS index."""
-        if os.path.exists(self.index_path):
+        """Loads index from disk with required security flag."""
+        try:
             self.vector_store = FAISS.load_local(
-                self.index_path, 
+                self.save_path, 
                 self.embeddings, 
                 allow_dangerous_deserialization=True
             )
-        else:
-            print("No index found. Please run index_documents first.")
+            return True
+        except Exception:
+            return False
+        
+    def semantic_search(self, query: str, k: int = 3):
+        """
+        Finds the most relevant document chunks for a given query.
+        """
+        # 1. Safety check: If the index isn't in memory, try loading it from disk
+        if self.vector_store is None:
+            success = self.load_faiss_index()
+            if not success:
+                # If still nothing, return an empty list so the app doesn't crash
+                return []
 
-    def semantic_search(self, query: str, k: int = 4):
-        """Finds the most relevant document chunks for a query."""
-        if not self.vector_store:
-            self.load_faiss_index()
-            
-        # Returns a list of LangChain Document objects
-        results = self.vector_store.similarity_search(query, k=k)
-        return results
+        # 2. Use LangChain's similarity search
+        try:
+            results = self.vector_store.similarity_search(query, k=k)
+            return results
+        except Exception as e:
+            print(f"Error during semantic search: {e}")
+            return []
 
 # Initialize Groq for the Generation part later
 def get_groq_llm():
     return ChatGroq(
         model="llama3-8b-8192", # Or "llama3-70b-8192" for higher reasoning
-        groq_api_key=os.environ.get("GROQ_API_KEY")
+        groq_api_key=os.getenv("GROQ_API_KEY")
     )
