@@ -3,8 +3,13 @@ langchain
 langchain-community
 langchain-groq
 langchain-core
+langchain-huggingface
+langchain-text-splitters
 faiss-cpu
 pypdf
+wikipedia
 tavily-python
 python-dotenv
+sentence-transformers
+pydantic
 tiktoken
