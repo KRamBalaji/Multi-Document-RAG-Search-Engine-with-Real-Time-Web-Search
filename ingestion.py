@@ -45,6 +45,8 @@ class DocumentIngestor:
                 
                 # 3. Load and add to our list
                 docs = loader.load()
+                for doc in docs:
+                    doc.metadata["title"] = uploaded_file.name  # This is the "key" the LLM uses to distinguish docs
                 # Manually add metadata to help FAISS later
                 for doc in docs:
                     doc.metadata["title"] = uploaded_file.name
@@ -123,23 +125,22 @@ class VectorEngine:
         except Exception:
             return False
         
-    def semantic_search(self, query: str, k: int = 3):
-        """
-        Finds the most relevant document chunks for a given query.
-        """
-        # 1. Safety check: If the index isn't in memory, try loading it from disk
+    def semantic_search(self, query: str, k: int = 6): # Increased k from 3 to 6
         if self.vector_store is None:
-            success = self.load_faiss_index()
-            if not success:
-                # If still nothing, return an empty list so the app doesn't crash
+            if not self.load_faiss_index():
                 return []
 
-        # 2. Use LangChain's similarity search
         try:
-            results = self.vector_store.similarity_search(query, k=k)
+            # MMR search helps find snippets from DIFFERENT documents
+            # fetch_k=20 looks at 20 candidates and picks the 6 most diverse ones
+            results = self.vector_store.max_marginal_relevance_search(
+                query, 
+                k=k, 
+                fetch_k=20 
+            )
             return results
         except Exception as e:
-            print(f"Error during semantic search: {e}")
+            print(f"Search Error: {e}")
             return []
 
 # Initialize Groq for the Generation part later
